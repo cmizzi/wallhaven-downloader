@@ -4,6 +4,17 @@ A simple CLI tool to download Wallhaven wallpapers directly from your terminal.
 
 > Work in progress
 
+## Installation
+
+```
+git clone git@github.com:cmizzi/wallhaven-downloader.git
+cd wallhaven-downloader
+cargo build --all --release
+
+# Execute the binary. You can copy/move it into your $PATH.
+./target/release/wallhaven-downloader --help
+```
+
 ## Usage
 
 ```
