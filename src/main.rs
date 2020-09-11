@@ -1,18 +1,64 @@
 #[macro_use]
 extern crate log;
 
-use std::fs::File;
-use std::io::copy;
+use std::{
+    collections::VecDeque,
+    error::Error,
+    fs::File,
+    io::{
+        copy,
+        Write,
+    },
+};
 
+use clap::Clap;
 use env_logger::Env;
-use select::document::Document;
-use select::predicate::{Attr, Class};
-//use tokio::time::Duration;
-use std::collections::VecDeque;
-use std::error::Error;
-use reqwest::Response;
+use rand::{
+    distributions::Alphanumeric,
+    Rng,
+    thread_rng,
+};
 use ratelimit::Limiter;
+use reqwest::Response;
+use select::{
+    document::Document,
+    predicate::{Attr, Class},
+};
 use tokio::time::Duration;
+
+#[derive(Clap, Debug)]
+#[clap(version = "1.0", author = "Cyril Mizzi <me@p1ngouin.com")]
+struct Opts {
+    /// Based on the following format : [General, Anime, People].
+    #[clap(short, long, default_value = "111")]
+    categories: String,
+
+    /// Based on the following format : [SFW, Sketchy].
+    #[clap(short, long, default_value = "100")]
+    purity: String,
+
+    /// Resolution is exact. The format should match the following pattern: <width>x<height>.
+    resolutions: String,
+
+    /// Directory to store wallpapers.
+    output: String,
+
+    /// Limit the number of wallpapers to download.
+    #[clap(short, long, default_value = "10")]
+    limit: u8,
+
+    /// Default sort to apply.
+    #[clap(short, long, default_value = "random")]
+    sorting: String,
+
+    /// Sort direction.
+    #[clap(short, long, default_value = "desc")]
+    direction: String,
+
+    /// Configure verbosity.
+    #[clap(short, long, parse(from_occurrences))]
+    verbose: i32,
+}
 
 #[derive(Debug)]
 struct Wallpaper {
@@ -24,33 +70,52 @@ impl Wallpaper {
     fn new(url: String) -> Self {
         let name = url.clone().split("/").last().unwrap().to_string();
 
-        Self { url, name, }
+        Self { url, name }
     }
 }
 
 struct Downloader<'a> {
-    limit: u16,
     wallpapers: VecDeque<Wallpaper>,
     limiter: &'a mut Limiter,
+    opts: &'a Opts,
+    seed: String,
 }
 
 impl<'a> Downloader<'a> {
-    fn new(limiter: &'a mut Limiter) -> Self {
+    /// Constructor.
+    fn new(limiter: &'a mut Limiter, opts: &'a Opts) -> Self {
         Self {
-            limit: 20,
             wallpapers: VecDeque::new(),
             limiter,
+            opts,
+            seed: thread_rng().sample_iter(&Alphanumeric).take(5).collect(),
         }
     }
 
+    /// Build the endpoint URL using CLI arguments.
+    fn build_url(&self, page: i32) -> String {
+        format!(
+            "https://wallhaven.cc/search?categories={}&purity={}&resolutions={}&sorting={}&order={}&seed={}&page={}",
+            self.opts.categories,
+            self.opts.purity,
+            self.opts.resolutions,
+            self.opts.sorting,
+            self.opts.direction,
+            self.seed,
+            page,
+        )
+    }
+
+    /// Execute the main loop.
     async fn execute(&mut self) -> Result<(), Box<dyn Error>> {
         let mut page = 1;
 
+        info!("Fetching wallpapers indexes.");
+
         'outer: loop {
+            let url = self.build_url(page);
             let response = self
-                .download(
-                    format!("https://wallhaven.cc/search?categories=111&purity=100&resolutions=1920x1080&sorting=random&order=desc&seed=oOeWg&page={}", page).as_str()
-                )
+                .download(&url)
                 .await?
                 .text().await?;
 
@@ -66,7 +131,7 @@ impl<'a> Downloader<'a> {
 
                 self.wallpapers.push_back(wallpaper?);
 
-                if self.wallpapers.len() >= self.limit as usize {
+                if self.wallpapers.len() >= self.opts.limit as usize {
                     break 'outer;
                 }
             }
@@ -74,7 +139,7 @@ impl<'a> Downloader<'a> {
             page += 1;
         }
 
-        let directory = "/home/cyril/Pictures/Wallpapers";
+        info!("Download wallpapers.");
 
         loop {
             let wallpaper = self.wallpapers.pop_front();
@@ -85,15 +150,21 @@ impl<'a> Downloader<'a> {
 
             let wallpaper = wallpaper.unwrap();
 
-            let mut dest = File::create(format!("{}/{}", directory, &wallpaper.name))?;
-            let content = self.download(&wallpaper.url).await?;
+            let mut dest = File::create(format!("{}/{}", self.opts.output, &wallpaper.name))?;
+            let response = self.download(&wallpaper.url).await?;
 
-            copy(&mut content.text().await?.as_bytes(), &mut dest)?;
+            let copied = copy(&mut response.bytes().await?.as_ref(), &mut dest);
+
+            match copied {
+                Ok(_) => info!("Wallpaper \"{}\" stored.", wallpaper.name),
+                Err(e) => error!("Error while storing the file: {}", e)
+            }
         }
 
         Ok(())
     }
 
+    /// Extract a wallpaper URL from the main picture URL.
     async fn extract_wallpaper_url(&mut self, url: &str) -> Result<String, Box<dyn Error>> {
         let response = self.download(url).await?;
         let path = response.url().path().to_string();
@@ -115,6 +186,10 @@ impl<'a> Downloader<'a> {
         Ok(src.unwrap())
     }
 
+    /// Execute a request.
+    ///
+    /// This method must use a rate limiter because Wallhaven would return a 429 for too many
+    /// requests.
     async fn download(&mut self, url: &str) -> Result<Response, Box<dyn Error>> {
         self.limiter.wait();
         let response = reqwest::get(url).await?;
@@ -126,19 +201,39 @@ impl<'a> Downloader<'a> {
                     .into()
             );
         } else {
-            info!("Successfully downloaded \"{}\".", response.url().path().to_string());
+            debug!("Successfully requested \"{}\".", response.url().path().to_string());
         }
 
         Ok(response)
     }
 }
 
+/// Initialize the logger.
+fn init_logger(opts: &Opts) {
+    let env = Env::default().default_filter_or(
+        match opts.verbose {
+            0 => "wallhaven_downloader=info",
+            1 => "wallhaven_downloader=debug",
+            2 => "debug",
+            _ => "trace",
+        }
+    );
+
+    env_logger::from_env(env)
+        .format(|buf, record| {
+            let level_style = buf.default_level_style(record.level());
+            writeln!(buf, "[{} {:>5}]: {}", buf.timestamp(), level_style.value(record.level()), record.args())
+        })
+        .init();
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::from_env(Env::default().default_filter_or("info")).init();
+    let opts: Opts = Opts::parse();
+    init_logger(&opts);
 
     let mut limiter = ratelimit::Builder::new().capacity(1).quantum(1).interval(Duration::new(1, 0)).build();
-    let mut downloader = Downloader::new(&mut limiter);
+    let mut downloader = Downloader::new(&mut limiter, &opts);
 
     downloader.execute().await?;
 
