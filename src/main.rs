@@ -68,7 +68,7 @@ struct Wallpaper {
 
 impl Wallpaper {
     fn new(url: String) -> Self {
-        let name = url.clone().split("/").last().unwrap().to_string();
+        let name = url.split('/').last().unwrap().to_string();
 
         Self { url, name }
     }
@@ -122,7 +122,7 @@ impl<'a> Downloader<'a> {
             for node in Document::from(response.as_str()).find(Class("preview")) {
                 let url = node.attr("href").unwrap();
                 let wallpaper = self.extract_wallpaper_url(url).await
-                    .and_then(|url| Ok(Wallpaper::new(url)));
+                    .map(Wallpaper::new);
 
                 if let Err(e) = wallpaper {
                     error!("{}", e);
@@ -173,7 +173,7 @@ impl<'a> Downloader<'a> {
         let document = Document::from(response.text().await?.as_str());
         let src = document.find(Attr("id", "wallpaper")).next()
             .and_then(|n| n.attr("data-cfsrc"))
-            .and_then(|src| Some(src.to_string()));
+            .map(|src| src.to_string());
 
         // If we can't find the source, we can't process, let's return an error.
         if src.is_none() {
